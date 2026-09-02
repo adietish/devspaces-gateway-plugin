@@ -59,8 +59,9 @@ class ConnectWaitTimeoutException(message: String) : IllegalStateException(messa
 class DevSpacesConnection(private val devSpacesContext: DevSpacesContext) {
 
     companion object {
-        const val CONNECT_TIMEOUT: Long = 240 * 1000 // millis
+        const val CONNECT_TIMEOUT: Long = 4 * 60 * 1000 // millis
         private const val CONNECT_POLL: Long = 200 // millis
+        private const val RETRY_BACKOFF_MS = 2_000L
     }
 
     /** Ensures [tearDownConnection] runs at most once for this connect attempt. */
@@ -101,15 +102,13 @@ class DevSpacesConnection(private val devSpacesContext: DevSpacesContext) {
             forwarder = fwd
 
             val effectiveJoinLink = joinLink.replace(":5990", ":$localPort")
-            val connectFailed = AtomicBoolean(false)
 
             checkCancelled?.invoke()
-            client = startThinClient(
-                URI(effectiveJoinLink), workspace, onConnected, onConnectionEnded, onDevWorkspaceStopped,
-                remoteIdeServer, forwarder, connectFailed, connectionLive
-            )
 
-            waitForThinClientConnect(client, connectFailed, checkCancelled)
+            client = retryThinClientConnection(
+                effectiveJoinLink, workspace, onConnected, onConnectionEnded, onDevWorkspaceStopped,
+                remoteIdeServer, forwarder, checkCancelled
+            )!!
 
             if (registerRestartWatcher == true) {
                 watchRestartAnnotation(
@@ -124,7 +123,7 @@ class DevSpacesConnection(private val devSpacesContext: DevSpacesContext) {
             onConnected()
             client
         } catch (e: Exception) {
-            if (e !is ConnectWaitTimeoutException || connectionLive.get()) {
+            if (e !is ConnectWaitTimeoutException) {
                 runCatching { client?.close() }
             }
             tearDownConnection(
@@ -132,6 +131,75 @@ class DevSpacesConnection(private val devSpacesContext: DevSpacesContext) {
             )
             throw e
         }
+    }
+
+    /**
+     * Retry loop for thin-client startup within the CONNECT_TIMEOUT budget.
+     * Returns the connected client, or throws on timeout.
+     *
+     * On failure: preserves partial download when clientPresent is false,
+     * retries while timeout budget remains with backoff.
+     * On success: breaks and returns the client.
+     */
+    @Suppress("UnstableApiUsage")
+    internal suspend fun retryThinClientConnection(
+        effectiveJoinLink: String,
+        workspace: DevWorkspace,
+        onConnected: () -> Unit,
+        onConnectionEnded: () -> Unit,
+        onDevWorkspaceStopped: () -> Unit,
+        remoteIdeServer: RemoteIDEServer?,
+        forwarder: Closeable?,
+        checkCancelled: (() -> Unit)?,
+    ): ThinClientHandle? {
+        var connectFailed = AtomicBoolean(false)
+        var currentClient: ThinClientHandle? = null
+        val connectionLive = AtomicBoolean(false)
+        var attempt = 0
+
+        val connectStart = System.currentTimeMillis()
+        while (true) {
+            attempt++
+            checkCancelled?.invoke()
+            if (connectFailed.get()) {
+                if (currentClient?.clientPresent == true) {
+                    runCatching { currentClient?.close() }
+                }
+                connectFailed.set(false)
+                currentClient = null
+            }
+
+            val elapsed = System.currentTimeMillis() - connectStart
+            val remaining = CONNECT_TIMEOUT - elapsed
+            if (remaining <= 0) {
+                throw ConnectWaitTimeoutException("Could not connect, workspace IDE is not ready.")
+            }
+
+            val launchFailed = CompletableDeferred<Unit>()
+            currentClient = startThinClient(
+                URI(effectiveJoinLink), workspace, onConnected, onConnectionEnded, onDevWorkspaceStopped,
+                remoteIdeServer, forwarder, connectFailed, connectionLive, launchFailed
+            ) ?: throw IOException("Could not start thin client.")
+
+            try {
+                waitForThinClientConnect(currentClient!!, connectFailed, checkCancelled, timeoutMs = remaining, launchFailed = launchFailed)
+                break
+            } catch (e: Exception) {
+                val currentClientRef = currentClient
+                if (currentClientRef?.clientPresent != true) {
+                    val elapsed2 = System.currentTimeMillis() - connectStart
+                    val remaining2 = CONNECT_TIMEOUT - elapsed2
+                    if (remaining2 > RETRY_BACKOFF_MS) {
+                        currentClient = null
+                        thisLogger().warn("Thin client launch failed (attempt $attempt), retrying in ${RETRY_BACKOFF_MS}ms: ${e.message}")
+                        delay(RETRY_BACKOFF_MS)
+                        continue
+                    }
+                }
+                throw e
+            }
+        }
+        return currentClient
     }
 
     /**
@@ -336,11 +404,12 @@ class DevSpacesConnection(private val devSpacesContext: DevSpacesContext) {
         val localPort = findFreePort()
         val forwarder = pods.forward(pod, localPort, 5990)
         pods.waitForForwardReady(localPort)
+        pods.waitForForwardAcceptingConnections(localPort)
         return forwarder to localPort
     }
 
     @Suppress("UnstableApiUsage")
-    private fun startThinClient(
+    internal fun startThinClient(
         effectiveJoinLink: URI,
         workspace: DevWorkspace,
         onConnected: () -> Unit,
@@ -350,7 +419,8 @@ class DevSpacesConnection(private val devSpacesContext: DevSpacesContext) {
         forwarder: Closeable?,
         connectFailed: AtomicBoolean,
         connectionLive: AtomicBoolean,
-    ): ThinClientHandle {
+        launchFailed: CompletableDeferred<Unit>? = null,
+    ): ThinClientHandle? {
         val thinClient = LinkedClientManager
             .getInstance()
             .startNewClient(
@@ -362,6 +432,7 @@ class DevSpacesConnection(private val devSpacesContext: DevSpacesContext) {
             )
 
         fun notifyThinClientClosed() {
+            launchFailed?.takeIf { !it.isCompleted }?.complete(Unit)
             onThinClientClosed(
                 connectFailed,
                 connectionLive,
@@ -384,20 +455,32 @@ class DevSpacesConnection(private val devSpacesContext: DevSpacesContext) {
         thinClient: ThinClientHandle,
         connectFailed: AtomicBoolean,
         checkCancelled: (() -> Unit)?,
-        timeoutMs: Long = CONNECT_TIMEOUT
+        timeoutMs: Long = CONNECT_TIMEOUT,
+        launchFailed: CompletableDeferred<Unit>? = null,
     ) {
         @Suppress("ConvertLongToDuration")
-        val connected = withTimeoutOrNull(timeoutMs) {
-            // Keep polling while the client is not present and no failure was reported:
-            // a transient absence must not fail the wait
-            while (!thinClient.clientPresent && !connectFailed.get()) {
+        val connected: Boolean? = withTimeoutOrNull(timeoutMs) {
+            while (true) {
+                if (thinClient.clientPresent && !connectFailed.get()) return@withTimeoutOrNull true
+                if (connectFailed.get()) return@withTimeoutOrNull false
                 checkCancelled?.invoke()
-                delay(CONNECT_POLL)
+                if (launchFailed != null) {
+                    try {
+                        withTimeout(CONNECT_POLL) { launchFailed.await() }
+                        return@withTimeoutOrNull false
+                    } catch (_: TimeoutCancellationException) {
+                        /* continue poll */
+                    }
+                    if (launchFailed.isCompleted) return@withTimeoutOrNull false
+                } else {
+                    delay(CONNECT_POLL)
+                }
             }
-            thinClient.clientPresent && !connectFailed.get()
-        } ?: false
-        if (!connected) {
+            false
+        }
+        if (connected == null) {
             throw ConnectWaitTimeoutException("Could not connect, workspace IDE is not ready.")
         }
+        check(connected) { "Could not connect, workspace IDE is not ready." }
     }
 }

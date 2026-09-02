@@ -46,6 +46,7 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import kotlin.time.Duration.Companion.milliseconds
@@ -1164,5 +1165,34 @@ class DevWorkspacePodsTest {
             index += n
             return n
         }
+    }
+
+    @Test
+    fun `#waitForForwardAcceptingConnections returns when port is accepting`() {
+        // given — listen on a real port
+        val server = ServerSocket(0, 0, InetAddress.getLoopbackAddress())
+        val port = server.localPort
+
+        try {
+            // when
+            pods.waitForForwardAcceptingConnections(port, timeoutMs = 5_000)
+
+            // then — should return without throwing
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun `#waitForForwardAcceptingConnections throws when port never accepts`() {
+        // given — a port with nothing listening; use a very short timeout so test is fast
+        val freePort = findFreePort()
+        val timeout = 500L // short timeout for fast test
+
+        // when / then
+        assertThatThrownBy {
+            pods.waitForForwardAcceptingConnections(freePort, timeoutMs = timeout)
+        }.isInstanceOf(IOException::class.java)
+            .hasMessageContaining("not accepting connections")
     }
 }

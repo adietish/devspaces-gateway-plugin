@@ -233,6 +233,24 @@ class DevWorkspacePods(private val client: ApiClient) {
         throw IOException("Port forwarding to local port $port is not ready after ${maxRetries * retryDelay}ms")
     }
 
+    @Throws(IOException::class)
+    fun waitForForwardAcceptingConnections(port: Int, timeoutMs: Long = 10_000) {
+        val retryDelay = 100L
+        val deadline = System.currentTimeMillis() + timeoutMs
+
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                Socket("127.0.0.1", port).use { return }
+            } catch (_: IOException) {
+                Thread.sleep(retryDelay)
+            } catch (_: Exception) {
+                Thread.sleep(retryDelay)
+            }
+        }
+
+        throw IOException("Port $port is not accepting connections after ${timeoutMs}ms")
+    }
+
     @Throws(ApiException::class)
     fun findFirst(namespace: String, labelSelector: String): V1Pod? {
         val pods = list(namespace, labelSelector)

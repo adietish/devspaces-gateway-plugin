@@ -25,6 +25,7 @@ import com.intellij.openapi.application.invokeLater
 import com.redhat.devtools.gateway.DevSpacesBundle
 import com.redhat.devtools.gateway.DevSpacesConnection
 import com.redhat.devtools.gateway.DevSpacesContext
+import com.redhat.devtools.gateway.util.ProgressCountdown
 import com.redhat.devtools.gateway.devworkspace.DevWorkspace
 import com.redhat.devtools.gateway.devworkspace.DevWorkspaceListItem
 import com.redhat.devtools.gateway.devworkspace.DevWorkspaces
@@ -390,6 +391,7 @@ class DevSpacesWorkspacesStepView(
         ProgressManager.getInstance().runProcessWithProgressSynchronously(
             {
                 try {
+                    val progressIndicator = ProgressManager.getInstance().progressIndicator
                     runBlocking(Dispatchers.IO) {
                         DevSpacesConnection(devSpacesContext).connect(
                             { refreshSelectedAndButtons() },
@@ -398,6 +400,9 @@ class DevSpacesWorkspacesStepView(
                                 if (waitDevWorkspaceStopped(devSpacesContext.devWorkspace)) {
                                     refreshSelectedAndButtons()
                                 }
+                            },
+                            onProgress = { event ->
+                                progressIndicator.text = event.message
                             }
                         )
                     }

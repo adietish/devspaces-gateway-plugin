@@ -12,13 +12,20 @@
 package com.redhat.devtools.gateway.devworkspace
 
 import com.jetbrains.gateway.thinClientLink.ThinClientHandle
+import com.redhat.devtools.gateway.ConnectWaitTimeoutException
 import com.redhat.devtools.gateway.DevSpacesConnection
 import com.redhat.devtools.gateway.DevSpacesContext
+import com.jetbrains.gateway.thinClientLink.LinkedClientManager
+import com.jetbrains.rd.util.lifetime.Lifetime
 import io.mockk.*
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
 
 class DevSpacesConnectionTest {
@@ -43,6 +50,10 @@ class DevSpacesConnectionTest {
         }
 
         connection = DevSpacesConnection(devSpacesContext)
+
+        // Mock LinkedClientManager.getInstance() to avoid NPE in tests
+        mockkObject(LinkedClientManager)
+        every { LinkedClientManager.getInstance() } returns mockk(relaxed = true)
 
         // Mock DevWorkspaces.get() for tearDownConnection's DevWorkspacePatch
         mockkConstructor(DevWorkspaces::class)
@@ -160,5 +171,111 @@ class DevSpacesConnectionTest {
         // then
         assertThat(connectFailed.get()).isTrue()
         verify(exactly = 0) { devSpacesContext.removeWorkspace(any()) }
+    }
+
+    @Test
+    fun `connect retries on connection failure and succeeds within timeout`() = runTest {
+        val spied = spyk(connection)
+        coEvery { spied.startThinClient(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns thinClient
+
+        val cfSlot = slot<AtomicBoolean>()
+        coEvery {
+            spied.waitForThinClientConnect(any(), capture(cfSlot), any(), any(), any())
+        } coAnswers {
+            cfSlot.captured.set(true)
+            throw IllegalStateException("Connection failed")
+        } andThen {
+            // second call succeeds (no-op)
+        }
+
+        spied.retryThinClientConnection(
+            "https://link", devSpacesContext.devWorkspace, {}, {}, {}, null, null, null
+        )
+
+        coVerify(exactly = 2) { spied.startThinClient(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 2) { spied.waitForThinClientConnect(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `retry on ConnectWaitTimeoutException when clientPresent never true and connectFailed false`() = runTest {
+        val spied = spyk(connection)
+        every { thinClient.clientPresent } returns false
+        coEvery { spied.startThinClient(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns thinClient
+
+        coEvery {
+            spied.waitForThinClientConnect(any(), any(), any(), any(), any())
+        } coAnswers {
+            throw ConnectWaitTimeoutException("timeout")
+        } andThen {
+            // second call succeeds
+        }
+
+        spied.retryThinClientConnection(
+            "https://link", devSpacesContext.devWorkspace, {}, {}, {}, null, null, null
+        )
+
+        coVerify(exactly = 2) { spied.startThinClient(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `no outer retry when clientPresent is true`() = runTest {
+        val spied = spyk(connection)
+        every { thinClient.clientPresent } returns true
+        coEvery { spied.startThinClient(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns thinClient
+        coEvery {
+            spied.waitForThinClientConnect(any(), any(), any(), any(), any())
+        } throws IllegalStateException("Connection failed")
+
+        var thrown: Throwable? = null
+        try {
+            spied.retryThinClientConnection(
+                "https://link", devSpacesContext.devWorkspace, {}, {}, {}, null, null, null
+            )
+        } catch (e: Throwable) {
+            thrown = e
+        }
+
+        assertThat(thrown).isInstanceOf(IllegalStateException::class.java)
+        coVerify(exactly = 1) { spied.startThinClient(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `waitForThinClientConnect exits immediately when launchFailed completes`() = runTest {
+        // given — client never present, but launchFailed triggers event-driven exit
+        val connectFailed = AtomicBoolean(false)
+        val launchFailed = CompletableDeferred<Unit>()
+        var callCount = 0
+        every { thinClient.clientPresent } answers {
+            callCount++
+            false
+        }
+
+        val startNanos = System.nanoTime()
+
+        // when — launchFailed completes after a short delay, should break out of poll loop
+        launch {
+            delay(100)
+            launchFailed.complete(Unit)
+        }
+
+        var thrown: Throwable? = null
+        try {
+            connection.waitForThinClientConnect(
+                thinClient,
+                connectFailed,
+                null,
+                timeoutMs = 60_000L,
+                launchFailed = launchFailed
+            )
+        } catch (e: Throwable) {
+            thrown = e
+        }
+
+        val elapsedMs = (System.nanoTime() - startNanos) / 1_000_000
+
+        // then — should exit quickly (within ~500ms) instead of waiting full timeout
+        assertThat(elapsedMs).isLessThan(500)
+        assertThat(thrown).isInstanceOf(IllegalStateException::class.java)
+        assertThat(thrown?.message).contains("Could not connect")
     }
 }
