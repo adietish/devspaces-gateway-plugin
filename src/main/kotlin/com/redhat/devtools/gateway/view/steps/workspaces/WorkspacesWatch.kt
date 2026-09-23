@@ -17,7 +17,6 @@ import com.redhat.devtools.gateway.devworkspace.DevWorkspaceListItem
 import com.redhat.devtools.gateway.devworkspace.DevWorkspaceTemplate
 import com.redhat.devtools.gateway.devworkspace.DevWorkspaceWatchManager
 import com.redhat.devtools.gateway.devworkspace.DevWorkspaces
-import com.redhat.devtools.gateway.devworkspace.WorkspaceEditorInfoProvider
 import com.redhat.devtools.gateway.devworkspace.WorkspaceEditorResolver
 import io.kubernetes.client.openapi.ApiClient
 import kotlinx.coroutines.CoroutineScope
@@ -59,12 +58,7 @@ internal class WorkspacesWatch(
         createWatch = { ns, latestResourceVersion ->
             devWorkspaces.createWatcher(ns, latestResourceVersion = latestResourceVersion)
         },
-        createFilter = { namespace ->
-            { dw ->
-                val templateMap = editorResolver.templateMapsByNamespace[namespace] ?: emptyMap()
-                WorkspaceEditorInfoProvider.isJetBrainsWorkspace(dw, templateMap)
-            }
-        },
+        createFilter = { _ -> { true } },
         listener = DevWorkspaceTableUpdater(workspacesTableModel, editorResolver),
         scope = scope
     )

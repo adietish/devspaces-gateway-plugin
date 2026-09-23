@@ -15,17 +15,13 @@ import com.redhat.devtools.gateway.devworkspace.DevWorkspace
 import com.redhat.devtools.gateway.devworkspace.DevWorkspaceObjectMeta
 import com.redhat.devtools.gateway.devworkspace.DevWorkspaceSpec
 import com.redhat.devtools.gateway.devworkspace.DevWorkspaceStatus
-import com.redhat.devtools.gateway.devworkspace.DevWorkspaceTemplate
-import com.redhat.devtools.gateway.devworkspace.DevWorkspaceTemplateMetadata
-import com.redhat.devtools.gateway.devworkspace.DevWorkspaceTemplateSpec
-import com.redhat.devtools.gateway.devworkspace.WorkspaceEditorInfoProvider
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 
 class WorkspacesWatchFilterTest {
 
     @Test
-    fun `createFilter rejects VS Code workspace and accepts JetBrains workspace`() {
+    fun `createFilter accepts all workspaces including VS Code`() {
         val jetBrainsDw = DevWorkspace(
             DevWorkspaceObjectMeta(name = "jb", namespace = "ns", uid = "uid-jb", emptyMap(), emptyMap()),
             DevWorkspaceSpec(started = true),
@@ -42,35 +38,12 @@ class WorkspacesWatchFilterTest {
             DevWorkspaceSpec(started = true),
             DevWorkspaceStatus(phase = "Running")
         )
-        val templateMapsByNamespace: Map<String, Map<String, List<DevWorkspaceTemplate>>> = mapOf(
-            "ns" to mapOf(
-                "uid-jb" to listOf(
-                    DevWorkspaceTemplate(
-                        metadata = DevWorkspaceTemplateMetadata(
-                            name = "jb-template",
-                            namespace = "ns",
-                            pluginRegistryUrl = null,
-                            ownerRefencesUids = listOf("uid-jb")
-                        ),
-                        spec = DevWorkspaceTemplateSpec(
-                            components = listOf(mapOf("volume" to mapOf("name" to "idea-server")))
-                        )
-                    )
-                )
-            )
-        )
 
-        // Same createFilter lambda pattern as WorkspacesWatch: namespace -> templateMap lookup
-        // then WorkspaceEditorInfoProvider.isJetBrainsWorkspace.
-        val createFilter: (String) -> ((DevWorkspace) -> Boolean) = { namespace ->
-            { dw ->
-                val templateMap = templateMapsByNamespace[namespace] ?: emptyMap()
-                WorkspaceEditorInfoProvider.isJetBrainsWorkspace(dw, templateMap)
-            }
-        }
+        // Same createFilter lambda pattern as WorkspacesWatch: accept every workspace.
+        val createFilter: (String) -> ((DevWorkspace) -> Boolean) = { _ -> { true } }
 
         val filter = createFilter("ns")
-        assertThat(filter(vscodeDw)).isFalse()
         assertThat(filter(jetBrainsDw)).isTrue()
+        assertThat(filter(vscodeDw)).isTrue()
     }
 }

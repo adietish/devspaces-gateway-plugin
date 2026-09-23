@@ -76,12 +76,6 @@ private fun WorkspaceEditorKind.isConnectableEditor(): Boolean {
     }
 }
 
-val DevWorkspace.displayName: String
-    get() {
-        val label = Utils.getValue(this.labels, arrayOf("kubernetes.io/metadata.name")) as String?
-        return label ?: this.name
-    }
-
 class DevSpacesWorkspacesStepView(
     private var devSpacesContext: DevSpacesContext,
     private val enableNextButton: (() -> Unit)?
@@ -241,7 +235,8 @@ class DevSpacesWorkspacesStepView(
 
         thisLogger().info(
             "Starting DevWorkspace watches: ${state.lastResourceVersions.size} namespaces" +
-                    " of ${projects.size} projects listed (${state.jetbrainsWorkspaceCount} JetBrains workspaces total)"
+                    " of ${projects.size} projects listed (${state.workspaceCount} workspaces;" +
+                    " ${state.jetbrainsWorkspaceCount} JetBrains)"
         )
 
         invokeLater(ModalityState.any()) {
@@ -262,6 +257,7 @@ class DevSpacesWorkspacesStepView(
         val templateMaps = mutableMapOf<String, Map<String, List<DevWorkspaceTemplate>>>()
         val namespacesUnavailable = mutableSetOf<String>()
         var jetbrainsWorkspaceCount = 0
+        var workspaceCount = 0
     }
 
     private fun fetchDevWorkspacesForNamespace(namespace: String, state: DevWorkspaceRefreshState): List<DevWorkspaceListItem> {
@@ -280,6 +276,7 @@ class DevSpacesWorkspacesStepView(
             state.lastResourceVersions[watchParams.namespace] = watchParams.resourceVersion
         }
         state.jetbrainsWorkspaceCount += watchParams.jetbrainsWorkspaceCount
+        state.workspaceCount += watchParams.workspaceCount
         return dwListResult.items
     }
 

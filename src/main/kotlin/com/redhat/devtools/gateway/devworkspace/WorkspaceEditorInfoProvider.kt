@@ -57,9 +57,10 @@ data class JetBrainsWorkspaceWatchParams(
     val namespace: String,
     val resourceVersion: String?,
     val jetbrainsWorkspaceCount: Int,
+    val workspaceCount: Int = 0,
 ) {
     val shouldWatch: Boolean
-        get() = jetbrainsWorkspaceCount > 0 && resourceVersion != null
+        get() = workspaceCount > 0 && resourceVersion != null
 }
 
 object WorkspaceEditorInfoProvider {
@@ -102,7 +103,12 @@ object WorkspaceEditorInfoProvider {
         resourceVersion: String?
     ): JetBrainsWorkspaceWatchParams {
         val jetbrainsCount = items.count { isJetBrainsWorkspace(it.workspace, templates) }
-        return JetBrainsWorkspaceWatchParams(namespace, resourceVersion, jetbrainsCount)
+        return JetBrainsWorkspaceWatchParams(
+            namespace = namespace,
+            resourceVersion = resourceVersion,
+            jetbrainsWorkspaceCount = jetbrainsCount,
+            workspaceCount = items.size,
+        )
     }
 
     internal fun isJetBrainsEditor(

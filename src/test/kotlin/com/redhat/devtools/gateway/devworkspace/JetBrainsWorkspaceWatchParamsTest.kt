@@ -17,7 +17,7 @@ import org.junit.jupiter.api.Test
 class JetBrainsWorkspaceWatchParamsTest {
 
     @Test
-    fun `only Jetbrains workspace out of 1 JetBrains and 1 VS Code is watched`() {
+    fun `mixed JetBrains and VS Code namespace is watched`() {
         val jetBrains = workspace(uid = "uid-jb", cheEditor = "eclipse/che-idea-server/latest")
         val vscode = workspace(uid = "uid-vscode", cheEditor = "eclipse/che-code/latest")
         val items = listOf(
@@ -28,12 +28,12 @@ class JetBrainsWorkspaceWatchParamsTest {
         val params =
             WorkspaceEditorInfoProvider.getJetBrainsWorkspaceWatchParams("ns", items, emptyMap(), "42")
 
-        assertThat(params).isEqualTo(JetBrainsWorkspaceWatchParams("ns", "42", 1))
+        assertThat(params).isEqualTo(JetBrainsWorkspaceWatchParams("ns", "42", 1, 2))
         assertThat(params.shouldWatch).isTrue()
     }
 
     @Test
-    fun `VS Code only namespace is not watched`() {
+    fun `VS Code only namespace is watched`() {
         val vscode = workspace(uid = "uid-vscode", cheEditor = "eclipse/che-code/latest")
         val items = listOf(
             DevWorkspaceListItem(vscode, WorkspaceEditorInfoProvider.create(vscode, emptyMap()))
@@ -42,7 +42,8 @@ class JetBrainsWorkspaceWatchParamsTest {
         val params =
             WorkspaceEditorInfoProvider.getJetBrainsWorkspaceWatchParams("ns", items, emptyMap(), "42")
 
-        assertThat(params.shouldWatch).isFalse()
+        assertThat(params.shouldWatch).isTrue()
+        assertThat(params.workspaceCount).isEqualTo(1)
         assertThat(params.jetbrainsWorkspaceCount).isEqualTo(0)
     }
 
@@ -71,7 +72,7 @@ class JetBrainsWorkspaceWatchParamsTest {
         val params =
             WorkspaceEditorInfoProvider.getJetBrainsWorkspaceWatchParams("ns", items, templates, "7")
 
-        assertThat(params).isEqualTo(JetBrainsWorkspaceWatchParams("ns", "7", 1))
+        assertThat(params).isEqualTo(JetBrainsWorkspaceWatchParams("ns", "7", 1, 1))
         assertThat(params.shouldWatch).isTrue()
     }
 
@@ -92,6 +93,7 @@ class JetBrainsWorkspaceWatchParamsTest {
         assertThat(params.namespace).isEqualTo("ns")
         assertThat(params.resourceVersion).isEqualTo("42")
         assertThat(params.jetbrainsWorkspaceCount).isEqualTo(2)
+        assertThat(params.workspaceCount).isEqualTo(3)
     }
 
     private fun workspace(uid: String, cheEditor: String?): DevWorkspace {
