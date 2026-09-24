@@ -158,7 +158,7 @@ class DevWorkspaces(private val client: ApiClient) {
         }
     }
 
-@Throws(ApiException::class)
+    @Throws(ApiException::class)
     fun start(namespace: String, name: String) {
         DevWorkspacePatch(namespace, name, client) {
             get(namespace, name)
@@ -328,7 +328,8 @@ class DevWorkspaces(private val client: ApiClient) {
     private fun ApiException.isIgnorableTemplateListError(): Boolean =
         isUnauthorized() || isForbidden() || isNotFound()
 
-    /** Returns `true` if the given exception is skippable when listing devworkspaces
+    /**
+     * Returns `true` if the given exception is skippable when listing devworkspaces
      * for a specific namespace during multi-namespace scanning.
      * Returns `false` otherwise.
      * Skippable errors: CRD missing (404 with CRD-not-found response body),
