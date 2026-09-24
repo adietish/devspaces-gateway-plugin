@@ -36,7 +36,7 @@ internal class WorkspacesWatch(
     }
 ) {
     private val devWorkspaces = DevWorkspaces(client)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    internal val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val editorResolver = WorkspaceEditorResolver(
         devWorkspaces = devWorkspaces,
@@ -55,13 +55,12 @@ internal class WorkspacesWatch(
     )
 
     private val watchManager = DevWorkspaceWatchManager(
-        createWatcher = { ns, latestResourceVersion ->
+        createWatch = { ns, latestResourceVersion ->
             devWorkspaces.createWatcher(ns, latestResourceVersion = latestResourceVersion)
         },
-        createFilter = { _ ->
-            { true }
-        },
-        listener = DevWorkspaceTableUpdater(workspacesTableModel, editorResolver)
+        createFilter = { _ -> { true } },
+        listener = DevWorkspaceTableUpdater(workspacesTableModel, editorResolver),
+        scope = scope
     )
 
     fun seedTemplateCache(
