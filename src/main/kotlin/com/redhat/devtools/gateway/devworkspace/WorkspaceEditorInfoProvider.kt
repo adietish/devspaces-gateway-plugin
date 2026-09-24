@@ -28,7 +28,24 @@ enum class WorkspaceEditorKind {
     KIRO,
     WEB_TERMINAL,
     JETBRAINS,
-    UNKNOWN,
+    UNKNOWN;
+
+    internal fun isJetBrainsFamily(): Boolean {
+        return when (this) {
+            INTELLIJ_IDEA,
+            PYCHARM,
+            CLION,
+            GOLAND,
+            PHPSTORM,
+            RIDER,
+            RUBYMINE,
+            WEBSTORM,
+            HERDR,
+            KIRO,
+            JETBRAINS -> true
+            else -> false
+        }
+    }
 }
 
 data class WorkspaceEditorInfo(
@@ -36,24 +53,19 @@ data class WorkspaceEditorInfo(
     val tooltip: String,
 )
 
-fun WorkspaceEditorKind.isJetBrainsFamily(): Boolean = when (this) {
-    WorkspaceEditorKind.INTELLIJ_IDEA,
-    WorkspaceEditorKind.PYCHARM,
-    WorkspaceEditorKind.CLION,
-    WorkspaceEditorKind.GOLAND,
-    WorkspaceEditorKind.PHPSTORM,
-    WorkspaceEditorKind.RIDER,
-    WorkspaceEditorKind.RUBYMINE,
-    WorkspaceEditorKind.WEBSTORM,
-    WorkspaceEditorKind.HERDR,
-    WorkspaceEditorKind.KIRO,
-    WorkspaceEditorKind.JETBRAINS -> true
-    else -> false
+data class NamespaceWatchDecision(
+    val namespace: String,
+    val resourceVersion: String?,
+    val jetbrainsWorkspaceCount: Int,
+    val workspaceCount: Int = 0,
+) {
+    val shouldWatch: Boolean
+        get() = workspaceCount > 0 && resourceVersion != null
 }
 
-private val CHE_EDITOR_ID_REGEX = Regex("che-.*-server", RegexOption.IGNORE_CASE)
-
 object WorkspaceEditorInfoProvider {
+
+    private val CHE_EDITOR_ID_REGEX = Regex("che-.*-server", RegexOption.IGNORE_CASE)
 
     fun create(
         devWorkspace: DevWorkspace,
@@ -82,6 +94,21 @@ object WorkspaceEditorInfoProvider {
         templateMap: Map<String, List<DevWorkspaceTemplate>>
     ): Boolean {
         return create(devWorkspace, templateMap).kind.isJetBrainsFamily()
+    }
+
+    fun getNamespaceWatchDecision(
+        namespace: String,
+        items: List<DevWorkspaceListItem>,
+        templates: Map<String, List<DevWorkspaceTemplate>>,
+        resourceVersion: String?
+    ): NamespaceWatchDecision {
+        val jetbrainsCount = items.count { isJetBrainsWorkspace(it.workspace, templates) }
+        return NamespaceWatchDecision(
+            namespace = namespace,
+            resourceVersion = resourceVersion,
+            jetbrainsWorkspaceCount = jetbrainsCount,
+            workspaceCount = items.size,
+        )
     }
 
     internal fun isJetBrainsEditor(

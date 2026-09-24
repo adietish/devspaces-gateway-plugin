@@ -29,6 +29,7 @@ import com.redhat.devtools.gateway.devworkspace.DevWorkspace
 import com.redhat.devtools.gateway.devworkspace.DevWorkspaceListItem
 import com.redhat.devtools.gateway.devworkspace.DevWorkspaces
 import com.redhat.devtools.gateway.devworkspace.DevWorkspaceTemplate
+import com.redhat.devtools.gateway.devworkspace.WorkspaceEditorInfoProvider
 import com.redhat.devtools.gateway.devworkspace.WorkspaceEditorKind
 import com.redhat.devtools.gateway.openshift.Projects
 import com.redhat.devtools.gateway.openshift.Utils
@@ -75,12 +76,6 @@ private fun WorkspaceEditorKind.isConnectableEditor(): Boolean {
     }
 }
 
-val DevWorkspace.displayName: String
-    get() {
-        val label = Utils.getValue(this.labels, arrayOf("kubernetes.io/metadata.name")) as String?
-        return label ?: this.name
-    }
-
 class DevSpacesWorkspacesStepView(
     private var devSpacesContext: DevSpacesContext,
     private val enableNextButton: (() -> Unit)?
@@ -96,6 +91,7 @@ class DevSpacesWorkspacesStepView(
     private lateinit var stopDevWorkspaceButton: JButton
 
     private var watchManager: WorkspacesWatch? = null
+    private var cachedWatchResourceVersions: Map<String, String?> = emptyMap()
 
     override val component = panel {
         row {
@@ -231,37 +227,70 @@ class DevSpacesWorkspacesStepView(
     }
 
     private fun refreshAllDevWorkspaces(): Map<String, String?> {
+        val state = DevWorkspaceRefreshState()
+        val projects = Projects(devSpacesContext.client).list()
+        val devWorkspaces = projects
+            .map { Utils.getValue(it, arrayOf("metadata", "name")) as String }
+            .flatMap { fetchDevWorkspacesForNamespace(it, state) }
+
+        thisLogger().info(
+            "Starting DevWorkspace watches: ${state.lastResourceVersions.size} namespaces" +
+                    " of ${projects.size} projects listed (${state.workspaceCount} workspaces;" +
+                    " ${state.jetbrainsWorkspaceCount} JetBrains)"
+        )
+
+        invokeLater(ModalityState.any()) {
+            updateDevWorkspacesTable(devWorkspaces)
+        }
+
+        watchManager?.seedTemplateCache(
+            state.templateMaps,
+            state.namespacesUnavailable
+        )
+
+        cachedWatchResourceVersions = state.lastResourceVersions
+        return state.lastResourceVersions
+    }
+
+    private class DevWorkspaceRefreshState {
         val lastResourceVersions = mutableMapOf<String, String?>()
         val templateMaps = mutableMapOf<String, Map<String, List<DevWorkspaceTemplate>>>()
         val namespacesUnavailable = mutableSetOf<String>()
-        val devWorkspaces = Projects(devSpacesContext.client).list()
-            .map { Utils.getValue(it, arrayOf("metadata", "name")) as String }
-            .flatMap { namespace ->
-                val dwListResult = DevWorkspaces(devSpacesContext.client).listWithResult(namespace)
-                lastResourceVersions[namespace] = dwListResult.resourceVersion
-                templateMaps[namespace] = dwListResult.templates
-                if (dwListResult.templatesUnavailable) {
-                    namespacesUnavailable.add(namespace)
-                }
-                dwListResult.items
-            }
+        var jetbrainsWorkspaceCount = 0
+        var workspaceCount = 0
+    }
 
-        invokeLater(ModalityState.any()) {
-            val selectedRow = devWorkspacesTable.selectedRow
-            devWorkspacesTableModel.apply {
-                clear()
-                addAll(devWorkspaces)
-            }
-            devWorkspacesTable.updateColumnWidths()
-            val newSelection = getValidSelectedIndex(selectedRow)
-            if (newSelection >= 0) {
-                devWorkspacesTable.setRowSelectionInterval(newSelection, newSelection)
-            }
+    private fun fetchDevWorkspacesForNamespace(namespace: String, state: DevWorkspaceRefreshState): List<DevWorkspaceListItem> {
+        val dwListResult = DevWorkspaces(devSpacesContext.client).listWithResult(namespace)
+        state.templateMaps[namespace] = dwListResult.templates
+        if (dwListResult.templatesUnavailable) {
+            state.namespacesUnavailable.add(namespace)
         }
+        val watchParams = WorkspaceEditorInfoProvider.getNamespaceWatchDecision(
+            namespace,
+            dwListResult.items,
+            dwListResult.templates,
+            dwListResult.resourceVersion
+        )
+        if (watchParams.shouldWatch) {
+            state.lastResourceVersions[watchParams.namespace] = watchParams.resourceVersion
+        }
+        state.jetbrainsWorkspaceCount += watchParams.jetbrainsWorkspaceCount
+        state.workspaceCount += watchParams.workspaceCount
+        return dwListResult.items
+    }
 
-        watchManager?.seedTemplateCache(templateMaps, namespacesUnavailable)
-
-        return lastResourceVersions
+    private fun updateDevWorkspacesTable(devWorkspaces: List<DevWorkspaceListItem>) {
+        val selectedRow = devWorkspacesTable.selectedRow
+        devWorkspacesTableModel.apply {
+            clear()
+            addAll(devWorkspaces)
+        }
+        devWorkspacesTable.updateColumnWidths()
+        val newSelection = getValidSelectedIndex(selectedRow)
+        if (newSelection >= 0) {
+            devWorkspacesTable.setRowSelectionInterval(newSelection, newSelection)
+        }
     }
 
     private fun getValidSelectedIndex(selectedIndex: Int): Int {
@@ -349,14 +378,19 @@ class DevSpacesWorkspacesStepView(
                     }
 
                     val remoteIdeServer = RemoteIDEServer(devSpacesContext)
-                    status = runBlocking {
-                        // Progress text stays visible for the whole wait; update so a long poll
-                        // does not look frozen while RemoteIDEServer probes status.
-                        progressIndicator.text =
-                            "Waiting for workspace IDE to become ready (up to ${RemoteIDEServer.readyTimeout}s)..."
-                        remoteIdeServer.waitServerReady(checkCancelled)
-                        progressIndicator.text = "Reading workspace IDE status..."
-                        remoteIdeServer.getStatus(checkCancelled)
+                    watchManager?.stop()
+                    try {
+                        status = runBlocking {
+                            // Progress text stays visible for the whole wait; update so a long poll
+                            // does not look frozen while RemoteIDEServer probes status.
+                            progressIndicator.text =
+                                "Waiting for workspace IDE to become ready (up to ${RemoteIDEServer.readyTimeout}s)..."
+                            remoteIdeServer.waitServerReady(checkCancelled)
+                            progressIndicator.text = "Reading workspace IDE status..."
+                            remoteIdeServer.getStatus(checkCancelled)
+                        }
+                    } finally {
+                        watchManager?.start(cachedWatchResourceVersions)
                     }
                 } catch (e: Exception) {
                     if (e.isCancellationException()) {
@@ -390,16 +424,21 @@ class DevSpacesWorkspacesStepView(
         ProgressManager.getInstance().runProcessWithProgressSynchronously(
             {
                 try {
-                    runBlocking(Dispatchers.IO) {
-                        DevSpacesConnection(devSpacesContext).connect(
-                            { refreshSelectedAndButtons() },
-                            { enableButtons() },
-                            {
-                                if (waitDevWorkspaceStopped(devSpacesContext.devWorkspace)) {
-                                    refreshSelectedAndButtons()
+                    watchManager?.stop()
+                    try {
+                        runBlocking(Dispatchers.IO) {
+                            DevSpacesConnection(devSpacesContext).connect(
+                                { refreshSelectedAndButtons() },
+                                { enableButtons() },
+                                {
+                                    if (waitDevWorkspaceStopped(devSpacesContext.devWorkspace)) {
+                                        refreshSelectedAndButtons()
+                                    }
                                 }
-                            }
-                        )
+                            )
+                        }
+                    } finally {
+                        watchManager?.start(cachedWatchResourceVersions)
                     }
                 } catch (e: Exception) {
                     refreshSelectedAndButtons()
